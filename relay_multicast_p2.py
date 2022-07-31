@@ -4,8 +4,8 @@
 # Title: Script to relay multicast/broadcast  #
 # Coder: csom@mackapaer.se                    #
 # Name: csoM                                  #
-# Date: 220729                                #
-# Version: 0.1                                #
+# Date: 220731                                #
+# Version: 0.2                                #
 ###############################################
 
 import socket # To access network
@@ -16,10 +16,23 @@ import argparse # To read arguments
 import time # To start a timer
 import select # To recieve data on sockets concurrent
 import re # To validate IP-address and port
+import subprocess # To make shell commands / get ARP-table
 
 # Create history list meant for storing known packets and then start timer
 history = []
 starttime = time.time()
+
+def parse_arp():
+    '''
+    Function to parse the arp table and then return the active arp-table
+    '''
+    dict_of_arpentrys = {}
+    for entry in subprocess.check_output("arp -n | awk '(NR>1) {print $5,$1,$3}'", shell=True).split('\n'):
+        if len(entry) > 2:
+            dict_entry = {"interface": entry.split(' ')[0], "mac": entry.split(' ')[2]}
+            dict_of_arpentrys.update({entry.split(' ')[1]: dict_entry})
+
+    return dict_of_arpentrys
 
 def ethernet_head(raw_data):
     '''
@@ -120,23 +133,6 @@ def checkhist(identifier):
     else:
         return False
 
-def check_same_subnet(sourceip, intip, intmask):
-    '''
-    Function to compare subnets, takes three arguments as source IP, interface IP, interface Mask
-    It then returns True or False
-    '''
-    sourcelist = [int(octett) for octett in sourceip.split('.')]
-    intiplist = [int(octett) for octett in intip.split('.')]
-    intmasklist = [int(octett) for octett in intmask.split('.')]
-
-    sourcesubnet = "{}.{}.{}.{}".format(sourcelist[0] & intmasklist[0], sourcelist[1] & intmasklist[1], sourcelist[2] & intmasklist[2], sourcelist[3] & intmasklist[3])
-    intsubnet = "{}.{}.{}.{}".format(intiplist[0] & intmasklist[0], intiplist[1] & intmasklist[1], intiplist[2] & intmasklist[2], intiplist[3] & intmasklist[3])
-
-    if sourcesubnet == intsubnet:
-        return True
-    else:
-        return False
-
 def printmessage(data):
     '''
     Function to print relay message, takes data: [0] B/M,[1] Address,[2] From interface,[3] Via interface
@@ -146,7 +142,7 @@ def printmessage(data):
     elif data[0] == 'M':
         print ("Relaying multicast address: {} from host: {} via interface: {}".format(data[1],data[2],data[3]))
 
-def relaying(ints, adds, listens, mac=False):
+def relaying(ints, adds, listens):
     '''
     Function to relay specified network traffic between interfaces, takes three arguments [interfaces], [addresses:port], [listens] and boolean mac
     '''
@@ -169,7 +165,6 @@ def relaying(ints, adds, listens, mac=False):
             print ("Address entered are neither multicast nor broadcast, quiting...")
             exit(0)  
 
-    
     for inter in listens:
 
         # For every interface loop through every address we want to monitor and join Multicast group 
@@ -199,7 +194,7 @@ def relaying(ints, adds, listens, mac=False):
 
             except Exception as e:
                 print ("1: ",e)
-    
+
     # Start infinite loop to listen to the RAW sockets and relay traffic
     while 1:
 
@@ -226,9 +221,15 @@ def relaying(ints, adds, listens, mac=False):
                     # For every address that match loop through interfaces again to send out traffic
                     for interface in ints:
                         
-                        # Compare source subnet to sending interface subnet and if same skip this iteration
-                        if check_same_subnet(ipv4[6], ni.ifaddresses(interface)[ni.AF_INET][0]['addr'], ni.ifaddresses(interface)[ni.AF_INET][0]['netmask']):
+                        # Check if received packet was received on the sending interface and if so skip
+                        if parse_arp()[ipv4[6]]['interface'] == interface:
                             continue
+                        
+                        # Check if the received packet really is coming from one of the listen interfaces
+                        # This has to be done since broadcasts are received on every interface on the device
+                        if typeofip(ipv4[7]) == 'B':
+                            if parse_arp()[ipv4[6]]['interface'] not in listens:
+                                continue
 
                         # Add a ethernet frame to the received packet and then send it
                         data_to_send = build_eth(recv_data, ni.ifaddresses(interface)[ni.AF_LINK][0]['addr'], ipv4[7])
@@ -280,6 +281,7 @@ def main():
                         "You have to specify a valid ip-address and port separated by a colon"
                         + "You provided {}".format(values),
                     )
+            values = list(set(values))
             setattr(namespace, self.dest, values)
 
     ints = ni.interfaces()
@@ -306,7 +308,7 @@ def main():
             print ("Please do not duplicate entrys in argument interfaces and listens...")
             return 0
 
-    print ("Starting to relay addresses between the following interfaces...", list(listens))
+    print ("Starting to relay addresses between the following interfaces... {}".format(" ".join(listens)))
     # If we want to run in background, fork the process and divert stdout to /dev/null
     if args.background:
         print ("Running in background...")
